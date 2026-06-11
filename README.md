@@ -1,9 +1,11 @@
 # tecofize-bot
 
-A Devvit web app that publishes posts to Reddit on behalf of a subreddit moderator. It exposes two integration surfaces:
+A Devvit web app that publishes posts to Reddit. It has two integration surfaces:
 
-1. **In-Reddit UI** — a "Create Post via Bot" context menu item visible to moderators in the subreddit.
-2. **External API** — a `POST /api/publish` endpoint consumed by the [reddit-poc](../reddit-poc) full-stack UI.
+1. **In-Reddit UI** — "Create Post via Bot" context menu for moderators.
+2. **Queue worker** — a cron job that polls an external Express backend every 30 seconds and publishes queued posts via `reddit.submitPost()`.
+
+> For the complete end-to-end setup guide see [WORKFLOW.md](../WORKFLOW.md).
 
 ---
 
@@ -11,7 +13,7 @@ A Devvit web app that publishes posts to Reddit on behalf of a subreddit moderat
 
 | Layer | Technology |
 |-------|-----------|
-| Platform | [Devvit](https://developers.reddit.com/) — Reddit's app platform |
+| Platform | [Devvit](https://developers.reddit.com/) — Reddit's official app platform |
 | Server framework | [Hono](https://hono.dev/) |
 | Build tool | [Vite](https://vite.dev/) via `@devvit/start/vite` |
 | Language | TypeScript |
@@ -22,270 +24,145 @@ A Devvit web app that publishes posts to Reddit on behalf of a subreddit moderat
 
 ```
 tecofize-bot/
-├── devvit.json          App manifest (menu items, forms, permissions)
+├── .env.example         Environment variable template
+├── devvit.json          App manifest (menu, forms, scheduler, permissions)
+├── vite.config.ts       Injects .env values into bundle at build time
 ├── package.json
 ├── tsconfig.json
-├── vite.config.ts
 └── src/
     ├── index.ts         Hono app entry — mounts all route groups
+    ├── config/
+    │   └── index.ts     Reads EXPRESS_PUBLIC_URL + DEVVIT_SECRET
     ├── core/
-    │   └── nuke.ts      Bulk comment moderation utilities (dormant)
+    │   ├── nuke.ts      Bulk comment moderation (dormant)
+    │   └── queuePoller.ts  Fetches queue from Express, calls reddit.submitPost()
     └── routes/
-        ├── api.ts       POST /api/publish  ← external integration point
+        ├── api.ts       POST /api/publish  (legacy direct path)
         ├── forms.ts     POST /internal/form/create-post-submit
         ├── menu.ts      POST /internal/menu/create-post
+        ├── tasks.ts     POST /internal/cron/poll-queue  ← cron handler
         └── triggers.ts  POST /internal/triggers/on-app-install
 ```
 
 ---
 
-## How it works
-
-### In-Reddit flow (moderator UI)
+## How the Queue Flow Works
 
 ```
-Moderator clicks "Create Post via Bot" in subreddit menu
+Express backend saves a pending job
     │
-    ▼
-Reddit POSTs → /internal/menu/create-post
-    │  returns showForm (title, body, linkUrl, imageUrl fields)
-    ▼
-Moderator fills form and submits
+    ▼  every 30 seconds
+Devvit cron fires → /internal/cron/poll-queue
     │
-    ▼
-Reddit POSTs form values → /internal/form/create-post-submit
-    │  calls reddit.submitPost()
-    ▼
-Post created in the subreddit
+    ▼  fetch() → GET {EXPRESS_PUBLIC_URL}/internal-api/queue
+Claims all pending jobs
+    │
+    ▼  for each job
+reddit.submitPost({ title, subredditName, text|url })
+    │
+    ▼  fetch() → POST {EXPRESS_PUBLIC_URL}/internal-api/queue/:id/complete
+Reports done or failed
 ```
 
-### External API flow (reddit-poc UI)
+The `reddit` client is Devvit's pre-authenticated API client — no OAuth tokens or API keys needed.
 
-```
-reddit-poc backend POSTs → /api/publish
-    { title, body?, imageUrl?, linkUrl?, subredditName }
-    │
-    ▼
-api.ts calls reddit.submitPost()
-    │
-    ▼
-Post created in the subreddit
-```
+---
 
-Post type is determined automatically:
-- `imageUrl` present → link post with image URL
-- `linkUrl` present (no imageUrl) → link post
-- Neither → text post using `body`
+## Environment Variables
+
+Copy `.env.example` to `.env` before running.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `EXPRESS_PUBLIC_URL` | ✅ | Public HTTPS URL of the Express backend. In dev: tunnel URL from `npx localtunnel --port 4000`. In prod: your deployed domain. |
+| `DEVVIT_SECRET` | ✅ | Shared secret added to every `fetch()` call as `x-devvit-secret`. Must match `DEVVIT_SECRET` in `reddit-poc/backend/.env`. |
+
+These are baked into the bundle at build time by `vite.config.ts`. **You must rebuild and redeploy after changing them.**
+
+Generate a secret:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
 ---
 
 ## Commands
 
 ```bash
-npm run login        # Authenticate Devvit CLI with your Reddit account (run once)
-npm run dev          # Playtest with live reload — prints a tunnel URL
-npm run build        # Production build → dist/server/index.cjs
+npm run login        # Authenticate Devvit CLI with Reddit (once per machine)
+npm run dev          # Playtest with live reload on your dev subreddit
+npm run build        # Production Vite build → dist/server/index.cjs
 npm run type-check   # tsc --build (no emit)
 npm run lint         # ESLint on src/
 npm run prettier     # Format all files
 npm run deploy       # type-check + lint + devvit upload (new version)
-npm run launch       # deploy + devvit publish (submits for Reddit review)
+npm run launch       # deploy + devvit publish (Reddit app review)
 ```
 
 ---
 
-## Deploying an Updated Bot
-
-Follow these steps every time you push a change.
-
-### Step 1 — Authenticate (first time only)
+## Deploying an Update
 
 ```bash
-npm run login
-```
-
-This opens a browser to authorise the Devvit CLI with your Reddit account. You only need to do this once per machine.
-
-### Step 2 — Install dependencies
-
-```bash
-npm install
-```
-
-### Step 3 — Type-check and lint
-
-```bash
-npm run type-check
-npm run lint
-```
-
-Fix any errors before continuing. The deploy script will reject a build with type errors.
-
-### Step 4 — Deploy (upload a new version)
-
-```bash
+# 1. Edit .env if EXPRESS_PUBLIC_URL or DEVVIT_SECRET changed
+# 2. Deploy
 npm run deploy
-```
 
-This runs `type-check → lint → devvit upload`. Devvit compiles the app and uploads it under your Reddit developer account. The command prints a version number on success, e.g.:
-
-```
-✓ Uploaded tecofize-bot@1.0.1
-```
-
-The new version is **not yet live** — it is staged for review or playtest.
-
-### Step 5 — Test the new version in playtest
-
-```bash
+# 3. Start playtest
 npm run dev
+
+# 4. Open the playtest URL in your browser to trigger on-app-install
+#    This re-schedules the pollQueue cron job
 ```
-
-`npm run dev` runs Vite in watch mode **and** starts the Devvit playtest session. It prints a tunnel URL like:
-
-```
-▲ Playtest running at https://app-<id>.playtest.devvit.dev
-```
-
-- Open Reddit and navigate to your **development subreddit** (the one you configured with Devvit during setup).
-- The new version is immediately live there. Test via the "Create Post via Bot" menu item and via the reddit-poc UI (see below).
-
-### Step 6 — Publish for production (optional)
-
-Once you are satisfied with the playtest:
-
-```bash
-npm run launch
-```
-
-This submits the app for Reddit's review process. After approval it becomes available for any subreddit to install.
 
 ---
 
-## Testing via the reddit-poc UI
+## devvit.json — Key Sections
 
-The [reddit-poc](../reddit-poc) app provides a browser UI that calls `/api/publish` directly. Here is how to run an end-to-end test.
-
-### Prerequisites
-
-- The bot is running in playtest (`npm run dev` is active and printing a tunnel URL).
-- You have Node.js ≥ 18 installed.
-
-### 1 — Note the tunnel URL
-
-While `npm run dev` is running, copy the URL it printed:
-
-```
-https://app-<id>.playtest.devvit.dev
-```
-
-### 2 — Configure the backend
-
-```bash
-cd ../reddit-poc/backend
-cp .env.example .env
-```
-
-Open `.env` and set:
-
-```env
-DEVVIT_BOT_URL=https://app-<id>.playtest.devvit.dev   # tunnel URL from above
-SUBREDDIT_NAME=your_dev_subreddit_name                 # without r/
-PORT=4000
-CORS_ORIGIN=http://localhost:5173
-```
-
-### 3 — Start the backend
-
-```bash
-npm install
-npm run dev
-```
-
-You should see:
-
-```
-[server] Reddit POC backend running on http://localhost:4000
-[server] Forwarding posts to Devvit bot at https://app-<id>.playtest.devvit.dev
-[server] Target subreddit: r/your_dev_subreddit_name
-```
-
-### 4 — Start the frontend
-
-```bash
-cd ../frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173` in your browser.
-
-### 5 — Publish a test post
-
-1. Select a post type: **Text**, **Image**, or **Link**.
-2. Enter a title (required).
-3. Fill in the body / upload an image / paste a URL depending on the type.
-4. Click **Publish Post**.
-5. The UI shows a green **"Published!"** banner on success or a red error message on failure.
-6. Navigate to your dev subreddit on Reddit to confirm the post appeared.
-
-### Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `Could not reach the Devvit bot` | Bot not running or wrong URL | Check `npm run dev` is active; re-copy the tunnel URL |
-| `SUBREDDIT_NAME is not configured` | Missing `.env` value | Set `SUBREDDIT_NAME` in `reddit-poc/backend/.env` |
-| `subredditName is required` | Bot received request without subreddit | Ensure `SUBREDDIT_NAME` is set in backend `.env` |
-| Post not appearing on Reddit | Wrong subreddit name, or account lacks mod perms | Confirm the account used in `npm run login` is a mod of the subreddit |
-| Image posts not working | Localhost image URL not reachable by Reddit | In dev, use a Text or Link post; for images in prod set `HOST_URL` in backend `.env` |
-
----
-
-## API Contract — `POST /api/publish`
-
-**URL:** `{DEVVIT_BOT_URL}/api/publish`  
-**Content-Type:** `application/json`
-
-### Request body
+### Scheduler
 
 ```json
-{
-  "title": "My post title",
-  "subredditName": "your_subreddit",
-  "body": "Optional body text",
-  "imageUrl": "https://...",
-  "linkUrl": "https://..."
+"scheduler": {
+  "tasks": {
+    "pollQueue": {
+      "endpoint": "/internal/cron/poll-queue"
+    }
+  }
 }
 ```
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `title` | string | ✅ | Max 300 characters |
-| `subredditName` | string | ✅ | Without `r/` prefix |
-| `body` | string | — | Used when neither `imageUrl` nor `linkUrl` is set |
-| `imageUrl` | string | — | Takes priority over `linkUrl` |
-| `linkUrl` | string | — | Used when `imageUrl` is absent |
+The task name `pollQueue` matches the argument passed to `scheduler.runJob({ name: 'pollQueue', cron: '*/30 * * * * *' })` in `triggers.ts`.
 
-### Success response `200`
+### HTTP Permissions
 
 ```json
-{ "success": true, "message": "Post published successfully." }
+"permissions": {
+  "http": {
+    "domains": ["loca.lt", "ngrok-free.app", "ngrok.io"]
+  }
+}
 ```
 
-### Error responses
-
-```json
-{ "success": false, "error": "Title is required." }          // 400
-{ "success": false, "error": "Failed to publish post: ..." } // 500
-```
+Add your production domain here when deploying to prod. Devvit blocks `fetch()` to undeclared domains.
 
 ---
 
-## Permissions
+## API Contracts
 
-Declared in `devvit.json`:
+### `POST /internal/cron/poll-queue`
 
-| Permission | Reason |
-|-----------|--------|
-| `reddit: true` | Required to call `reddit.submitPost()` |
-| `media: true` | Required for image uploads via the in-Reddit form |
+Called by Reddit's scheduler every 30 seconds. No request body needed. Internally calls `pollAndPublish()` from `src/core/queuePoller.ts`.
+
+### `POST /api/publish` (legacy)
+
+Direct publish — used by the in-Reddit moderator form. Not called by the queue flow.
+
+```json
+{
+  "title": "string (required)",
+  "subredditName": "string (required)",
+  "body": "string (optional)",
+  "imageUrl": "string (optional)",
+  "linkUrl": "string (optional)"
+}
+```

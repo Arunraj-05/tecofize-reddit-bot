@@ -13,11 +13,25 @@
         "location": ["subreddit", "post"],
         "forUserType": "moderator",
         "endpoint": "/internal/menu/create-post"
+      },
+      {
+        "label": "Schedule Queue Poller",
+        "description": "Re-schedule the background queue poller. Run this once after each deploy.",
+        "location": ["subreddit"],
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/schedule-poller"
       }
     ]
   },
   "forms": {
     "createPost": "/internal/form/create-post-submit"
+  },
+  "scheduler": {
+    "tasks": {
+      "pollQueue": {
+        "endpoint": "/internal/cron/poll-queue"
+      }
+    }
   },
   "scripts": {
     "build": "vite build",
@@ -25,6 +39,13 @@
   },
   "permissions": {
     "reddit": true,
-    "media": true
+    "media": true,
+    "http": {
+      "domains": [
+        "sharp-comics-relate.loca.lt",
+        "ngrok-free.app",
+        "ngrok.io"
+      ]
+    }
   }
 }
