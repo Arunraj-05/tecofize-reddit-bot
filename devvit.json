@@ -1,0 +1,30 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "tecofize-bot",
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "menu": {
+    "items": [
+      {
+        "label": "Create Post via Bot",
+        "description": "Create a new text post in this subreddit.",
+        "location": ["subreddit", "post"],
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/create-post"
+      }
+    ]
+  },
+  "forms": {
+    "createPost": "/internal/form/create-post-submit"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "permissions": {
+    "reddit": true,
+    "media": true
+  }
+}
